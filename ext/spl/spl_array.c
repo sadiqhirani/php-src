@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | PHP Version 7                                                        |
    +----------------------------------------------------------------------+
-   | Copyright (c) 1997-2015 The PHP Group                                |
+   | Copyright (c) 1997-2016 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -130,6 +130,10 @@ static zend_always_inline uint32_t *spl_array_get_pos_ptr(HashTable *ht, spl_arr
 static void spl_array_object_free_storage(zend_object *object)
 {
 	spl_array_object *intern = spl_array_from_obj(object);
+	
+	if (intern->ht_iter != (uint32_t) -1) {
+		zend_hash_iterator_del(intern->ht_iter);
+	}
 
 	zend_object_std_dtor(&intern->std);
 
@@ -273,7 +277,7 @@ static zval *spl_array_get_dimension_ptr(int check_inherited, zval *object, zval
 
 	if ((type == BP_VAR_W || type == BP_VAR_RW) && (ht->u.v.nApplyCount > 0)) {
 		zend_error(E_WARNING, "Modification of ArrayObject during sorting is prohibited");
-		return &EG(error_zval);;
+		return &EG(error_zval);
 	}
 
 try_again:
@@ -1169,8 +1173,8 @@ zend_object_iterator *spl_array_get_iterator(zend_class_entry *ce, zval *object,
 }
 /* }}} */
 
-/* {{{ proto void ArrayObject::__construct(array|object ar = array() [, int flags = 0 [, string iterator_class = "ArrayIterator"]])
-       proto void ArrayIterator::__construct(array|object ar = array() [, int flags = 0])
+/* {{{ proto void ArrayObject::__construct([array|object ar = array() [, int flags = 0 [, string iterator_class = "ArrayIterator"]]])
+       proto void ArrayIterator::__construct([array|object ar = array() [, int flags = 0]])
    Constructs a new array iterator from a path. */
 SPL_METHOD(Array, __construct)
 {
@@ -1774,6 +1778,7 @@ SPL_METHOD(Array, unserialize)
 		intern->ar_flags &= ~SPL_ARRAY_CLONE_MASK;
 		intern->ar_flags |= flags & SPL_ARRAY_CLONE_MASK;
 		zval_ptr_dtor(&intern->array);
+		ZVAL_UNDEF(&intern->array);
 		if (!php_var_unserialize(&intern->array, &p, s + buf_len, &var_hash)) {
 			goto outexcept;
 		}
@@ -1812,6 +1817,8 @@ outexcept:
 /* {{{ arginfo and function table */
 ZEND_BEGIN_ARG_INFO_EX(arginfo_array___construct, 0, 0, 0)
 	ZEND_ARG_INFO(0, array)
+	ZEND_ARG_INFO(0, ar_flags)
+	ZEND_ARG_INFO(0, iterator_class)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_array_offsetGet, 0, 0, 1)
