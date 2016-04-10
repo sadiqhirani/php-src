@@ -195,6 +195,7 @@ typedef struct _zend_accel_directives {
 	zend_long           max_file_size;
 	zend_long           interned_strings_buffer;
 	char          *restrict_api;
+	char          *lockfile_path;
 #ifdef HAVE_OPCACHE_FILE_CACHE
 	char          *file_cache;
 	zend_bool      file_cache_only;
@@ -286,7 +287,7 @@ extern zend_accel_shared_globals *accel_shared_globals;
 # define ZCG(v)	ZEND_TSRMG(accel_globals_id, zend_accel_globals *, v)
 extern int accel_globals_id;
 # ifdef COMPILE_DL_OPCACHE
-ZEND_TSRMLS_CACHE_EXTERN();
+ZEND_TSRMLS_CACHE_EXTERN()
 # endif
 #else
 # define ZCG(v) (accel_globals.v)
@@ -296,6 +297,7 @@ extern zend_accel_globals accel_globals;
 extern char *zps_api_failure_reason;
 
 void accel_shutdown(void);
+int  accel_post_deactivate(void);
 void zend_accel_schedule_restart(zend_accel_restart_reason reason);
 void zend_accel_schedule_restart_if_necessary(zend_accel_restart_reason reason);
 accel_time_t zend_get_file_handle_timestamp(zend_file_handle *file_handle, size_t *size);

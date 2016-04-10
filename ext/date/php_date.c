@@ -3054,6 +3054,7 @@ static int php_date_modify(zval *object, char *modify, size_t modify_len) /* {{{
 	timelib_update_ts(dateobj->time, NULL);
 	timelib_update_from_sse(dateobj->time);
 	dateobj->time->have_relative = 0;
+	memset(&dateobj->time->relative, 0, sizeof(dateobj->time->relative));
 
 	return 1;
 } /* }}} */
@@ -4269,6 +4270,10 @@ static zend_string *date_interval_format(char *format, size_t format_len, timeli
 
 	smart_str_0(&string);
 
+	if (string.s == NULL) {
+		return ZSTR_EMPTY_ALLOC();
+	}
+
 	return string.s;
 }
 /* }}} */
@@ -4445,6 +4450,10 @@ PHP_METHOD(DatePeriod, getEndDate)
         }
 
         dpobj = Z_PHPPERIOD_P(getThis());
+
+        if (!dpobj->end) {
+                return;
+        }
 
         php_date_instantiate(dpobj->start_ce, return_value);
         dateobj = Z_PHPDATE_P(return_value);

@@ -664,6 +664,15 @@ static int zend_ssa_rename(const zend_op_array *op_array, uint32_t build_flags, 
 						var[EX_VAR_TO_NUM(opline->op1.var)] = ssa_vars_count;
 						ssa_vars_count++;
 					}
+					break;
+				case ZEND_VERIFY_RETURN_TYPE:
+					if (opline->op1_type & (IS_TMP_VAR|IS_VAR|IS_CV)) {
+						ssa_ops[k].op1_def = ssa_vars_count;
+						var[EX_VAR_TO_NUM(opline->op1.var)] = ssa_vars_count;
+						ssa_vars_count++;
+						//NEW_SSA_VAR(opline->op1.var)
+					}
+					break;
 				default:
 					break;
 			}
@@ -759,8 +768,8 @@ int zend_build_ssa(zend_arena **arena, const zend_op_array *op_array, uint32_t b
 	int *var = NULL;
 	int i, j, k, changed;
 	zend_dfg dfg;
-	ALLOCA_FLAG(dfg_use_heap);
-	ALLOCA_FLAG(var_use_heap);
+	ALLOCA_FLAG(dfg_use_heap)
+	ALLOCA_FLAG(var_use_heap)
 
 	ssa->rt_constants = (build_flags & ZEND_RT_CONSTANTS);
 	ssa_blocks = zend_arena_calloc(arena, blocks_count, sizeof(zend_ssa_block));

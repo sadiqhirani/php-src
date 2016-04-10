@@ -363,7 +363,6 @@ int zend_build_cfg(zend_arena **arena, const zend_op_array *op_array, uint32_t b
 				break;
 			case ZEND_FE_RESET_R:
 			case ZEND_FE_RESET_RW:
-			case ZEND_NEW:
 				BB_START(OP_JMP_ADDR(opline, opline->op2) - op_array->opcodes);
 				BB_START(i + 1);
 				break;
@@ -496,7 +495,6 @@ int zend_build_cfg(zend_arena **arena, const zend_op_array *op_array, uint32_t b
 				break;
 			case ZEND_FE_RESET_R:
 			case ZEND_FE_RESET_RW:
-			case ZEND_NEW:
 				record_successor(blocks, j, 0, block_map[OP_JMP_ADDR(opline, opline->op2) - op_array->opcodes]);
 				record_successor(blocks, j, 1, j + 1);
 				break;
@@ -585,16 +583,45 @@ int zend_cfg_build_predecessors(zend_arena **arena, zend_cfg *cfg) /* {{{ */
 }
 /* }}} */
 
+/* Computes a postorder numbering of the CFG */
+static void compute_postnum_recursive(
+		int *postnum, int *cur, const zend_cfg *cfg, int block_num) /* {{{ */
+{
+	zend_basic_block *block = &cfg->blocks[block_num];
+	if (postnum[block_num] != -1) {
+		return;
+	}
+
+	postnum[block_num] = -2; /* Marker for "currently visiting" */
+	if (block->successors[0] >= 0) {
+		compute_postnum_recursive(postnum, cur, cfg, block->successors[0]);
+		if (block->successors[1] >= 0) {
+			compute_postnum_recursive(postnum, cur, cfg, block->successors[1]);
+		}
+	}
+	postnum[block_num] = (*cur)++;
+}
+/* }}} */
+
+/* Computes dominator tree using algorithm from "A Simple, Fast Dominance Algorithm" by
+ * Cooper, Harvey and Kennedy. */
 int zend_cfg_compute_dominators_tree(const zend_op_array *op_array, zend_cfg *cfg) /* {{{ */
 {
 	zend_basic_block *blocks = cfg->blocks;
 	int blocks_count = cfg->blocks_count;
 	int j, k, changed;
 
+	ALLOCA_FLAG(use_heap)
+	int *postnum = do_alloca(sizeof(int) * cfg->blocks_count, use_heap);
+	memset(postnum, -1, sizeof(int) * cfg->blocks_count);
+	j = 0;
+	compute_postnum_recursive(postnum, &j, cfg, 0);
+
 	/* FIXME: move declarations */
 	blocks[0].idom = 0;
 	do {
 		changed = 0;
+		/* Iterating in RPO here would converge faster */
 		for (j = 1; j < blocks_count; j++) {
 			int idom = -1;
 
@@ -612,8 +639,8 @@ int zend_cfg_compute_dominators_tree(const zend_op_array *op_array, zend_cfg *cf
 
 				if (blocks[pred].idom >= 0) {
 					while (idom != pred) {
-						while (pred > idom) pred = blocks[pred].idom;
-						while (idom > pred) idom = blocks[idom].idom;
+						while (postnum[pred] < postnum[idom]) pred = blocks[pred].idom;
+						while (postnum[idom] < postnum[pred]) idom = blocks[idom].idom;
 					}
 				}
 			}
@@ -664,6 +691,7 @@ int zend_cfg_compute_dominators_tree(const zend_op_array *op_array, zend_cfg *cf
 		blocks[j].level = level;
 	}
 
+	free_alloca(postnum, use_heap);
 	return SUCCESS;
 }
 /* }}} */
@@ -685,8 +713,8 @@ int zend_cfg_identify_loops(const zend_op_array *op_array, zend_cfg *cfg, uint32
 	int *dj_spanning_tree;
 	zend_worklist work;
 	int flag = ZEND_FUNC_NO_LOOPS;
-	ALLOCA_FLAG(list_use_heap);
-	ALLOCA_FLAG(tree_use_heap);
+	ALLOCA_FLAG(list_use_heap)
+	ALLOCA_FLAG(tree_use_heap)
 
 	ZEND_WORKLIST_ALLOCA(&work, cfg->blocks_count, list_use_heap);
 	dj_spanning_tree = do_alloca(sizeof(int) * cfg->blocks_count, tree_use_heap);

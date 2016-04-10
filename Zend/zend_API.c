@@ -370,11 +370,7 @@ ZEND_API int ZEND_FASTCALL zend_parse_arg_long_cap_weak(zval *arg, zend_long *de
 		if (UNEXPECTED(zend_isnan(Z_DVAL_P(arg)))) {
 			return 0;
 		}
-		if (UNEXPECTED(!ZEND_DOUBLE_FITS_LONG(Z_DVAL_P(arg)))) {
-			*dest = (Z_DVAL_P(arg) > 0) ? ZEND_LONG_MAX : ZEND_LONG_MIN;
-		} else {
-			*dest = zend_dval_to_lval(Z_DVAL_P(arg));
-		}
+		*dest = zend_dval_to_lval_cap(Z_DVAL_P(arg));
 	} else if (EXPECTED(Z_TYPE_P(arg) == IS_STRING)) {
 		double d;
 		int type;
@@ -384,11 +380,7 @@ ZEND_API int ZEND_FASTCALL zend_parse_arg_long_cap_weak(zval *arg, zend_long *de
 				if (UNEXPECTED(zend_isnan(d))) {
 					return 0;
 				}
-				if (UNEXPECTED(!ZEND_DOUBLE_FITS_LONG(d))) {
-					*dest = (d > 0) ? ZEND_LONG_MAX : ZEND_LONG_MIN;
-				} else {
-					*dest = zend_dval_to_lval(d);
-				}
+				*dest = zend_dval_to_lval_cap(d);
 			} else {
 				return 0;
 			}
@@ -1229,8 +1221,15 @@ ZEND_API void object_properties_load(zend_object *object, HashTable *properties)
 				size_t prop_name_len;
 				if (zend_unmangle_property_name_ex(key, &class_name, &prop_name, &prop_name_len) == SUCCESS) {
 					zend_string *pname = zend_string_init(prop_name, prop_name_len, 0);
+					zend_class_entry *prev_scope = EG(scope);
+					if (class_name && class_name[0] != '*') {
+						zend_string *cname = zend_string_init(class_name, strlen(class_name), 0);
+						EG(scope) = zend_lookup_class(cname);
+						zend_string_release(cname);
+					}
 					property_info = zend_get_property_info(object->ce, pname, 1);
 					zend_string_release(pname);
+					EG(scope) = prev_scope;
 				} else {
 					property_info = ZEND_WRONG_PROPERTY_INFO;
 				}
@@ -3420,7 +3419,6 @@ ZEND_API int zend_fcall_info_init(zval *callable, uint check_flags, zend_fcall_i
 	fci->param_count = 0;
 	fci->params = NULL;
 	fci->no_separation = 1;
-	fci->symbol_table = NULL;
 
 	return SUCCESS;
 }

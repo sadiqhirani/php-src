@@ -206,7 +206,7 @@ static void zend_optimize_block(zend_basic_block *block, zend_op_array *op_array
 					l = old_len + Z_STRLEN(ZEND_OP1_LITERAL(opline));
 					if (!Z_REFCOUNTED(ZEND_OP1_LITERAL(last_op))) {
 						zend_string *tmp = zend_string_alloc(l, 0);
-					memcpy(ZSTR_VAL(tmp), Z_STRVAL(ZEND_OP1_LITERAL(last_op)), old_len);
+						memcpy(ZSTR_VAL(tmp), Z_STRVAL(ZEND_OP1_LITERAL(last_op)), old_len);
 						Z_STR(ZEND_OP1_LITERAL(last_op)) = tmp;
 					} else {
 						Z_STR(ZEND_OP1_LITERAL(last_op)) = zend_string_extend(Z_STR(ZEND_OP1_LITERAL(last_op)), l, 0);
@@ -215,10 +215,7 @@ static void zend_optimize_block(zend_basic_block *block, zend_op_array *op_array
 					memcpy(Z_STRVAL(ZEND_OP1_LITERAL(last_op)) + old_len, Z_STRVAL(ZEND_OP1_LITERAL(opline)), Z_STRLEN(ZEND_OP1_LITERAL(opline)));
 					Z_STRVAL(ZEND_OP1_LITERAL(last_op))[l] = '\0';
 					zval_dtor(&ZEND_OP1_LITERAL(opline));
-					Z_STR(ZEND_OP1_LITERAL(opline)) = zend_new_interned_string(Z_STR(ZEND_OP1_LITERAL(last_op)));
-					if (!Z_REFCOUNTED(ZEND_OP1_LITERAL(opline))) {
-						Z_TYPE_FLAGS(ZEND_OP1_LITERAL(opline)) &= ~ (IS_TYPE_REFCOUNTED | IS_TYPE_COPYABLE);
-					}
+					ZVAL_STR(&ZEND_OP1_LITERAL(opline), zend_new_interned_string(Z_STR(ZEND_OP1_LITERAL(last_op))));
 					ZVAL_NULL(&ZEND_OP1_LITERAL(last_op));
 					MAKE_NOP(last_op);
 				}
@@ -587,10 +584,7 @@ static void zend_optimize_block(zend_basic_block *block, zend_op_array *op_array
 						memcpy(Z_STRVAL(ZEND_OP2_LITERAL(src)) + old_len, Z_STRVAL(ZEND_OP2_LITERAL(opline)), Z_STRLEN(ZEND_OP2_LITERAL(opline)));
 						Z_STRVAL(ZEND_OP2_LITERAL(src))[l] = '\0';
 						zend_string_release(Z_STR(ZEND_OP2_LITERAL(opline)));
-						Z_STR(ZEND_OP2_LITERAL(opline)) = zend_new_interned_string(Z_STR(ZEND_OP2_LITERAL(src)));
-						if (!Z_REFCOUNTED(ZEND_OP2_LITERAL(opline))) {
-							Z_TYPE_FLAGS(ZEND_OP2_LITERAL(opline)) &= ~ (IS_TYPE_REFCOUNTED | IS_TYPE_COPYABLE);
-						}
+						ZVAL_STR(&ZEND_OP2_LITERAL(opline), zend_new_interned_string(Z_STR(ZEND_OP2_LITERAL(src))));
 						ZVAL_NULL(&ZEND_OP2_LITERAL(src));
 						MAKE_NOP(src);
 					}
@@ -691,7 +685,12 @@ optimize_constant_binary_op:
 						SET_VAR_SOURCE(opline);
 		                opline++;
 						continue;
+					} else if (zend_binary_op_produces_numeric_string_error(opline->opcode, &ZEND_OP1_LITERAL(opline), &ZEND_OP2_LITERAL(opline))) {
+						SET_VAR_SOURCE(opline);
+		                opline++;
+						continue;
 					}
+					printf("%d\n", opline->opcode);
 					er = EG(error_reporting);
 					EG(error_reporting) = 0;
 					if (binary_op(&result, &ZEND_OP1_LITERAL(opline), &ZEND_OP2_LITERAL(opline)) == SUCCESS) {
@@ -852,7 +851,6 @@ static void assemble_code_blocks(zend_cfg *cfg, zend_op_array *op_array)
 			case ZEND_JMPNZ_EX:
 			case ZEND_FE_RESET_R:
 			case ZEND_FE_RESET_RW:
-			case ZEND_NEW:
 			case ZEND_JMP_SET:
 			case ZEND_COALESCE:
 			case ZEND_ASSERT_CHECK:
@@ -954,17 +952,20 @@ static void assemble_code_blocks(zend_cfg *cfg, zend_op_array *op_array)
 		}
 
 		if (i != j) {
-			zend_op *opline = new_opcodes;
-			zend_op *end = opline + len;
-
-			op_array->last_live_range = j;
-			while (opline != end) {
-				if ((opline->opcode == ZEND_FREE || opline->opcode == ZEND_FE_FREE) &&
-				    opline->extended_value == ZEND_FREE_ON_RETURN) {
-					ZEND_ASSERT(opline->op2.num < (uint32_t) i);
-					opline->op2.num = map[opline->op2.num];
+			if ((op_array->last_live_range = j)) {
+				zend_op *opline = new_opcodes;
+				zend_op *end = opline + len;
+				while (opline != end) {
+					if ((opline->opcode == ZEND_FREE || opline->opcode == ZEND_FE_FREE) &&
+							opline->extended_value == ZEND_FREE_ON_RETURN) {
+						ZEND_ASSERT(opline->op2.num < (uint32_t) i);
+						opline->op2.num = map[opline->op2.num];
+					}
+					opline++;
 				}
-				opline++;
+			} else {
+				efree(op_array->live_range);
+				op_array->live_range = NULL;
 			}
 		}
 		free_alloca(map, use_heap);
@@ -1632,8 +1633,11 @@ static void zend_t_usage(zend_cfg *cfg, zend_op_array *op_array, zend_bitset use
 						case ZEND_BOOL_NOT:
 							if (ZEND_OP1_TYPE(opline) == IS_CONST) {
 								literal_dtor(&ZEND_OP1_LITERAL(opline));
+							} else if (ZEND_OP1_TYPE(opline) == IS_TMP_VAR) {
+								opline->opcode = ZEND_FREE;
+							} else {
+								MAKE_NOP(opline);
 							}
-							MAKE_NOP(opline);
 							break;
 						case ZEND_JMPZ_EX:
 						case ZEND_JMPNZ_EX:
