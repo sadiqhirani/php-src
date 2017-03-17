@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | PHP Version 7                                                        |
    +----------------------------------------------------------------------+
-   | Copyright (c) 1997-2016 The PHP Group                                |
+   | Copyright (c) 1997-2017 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -31,11 +31,7 @@
 #include <fcntl.h>
 
 #include "zend_smart_str.h"
-#ifndef NETWARE
 #include "ext/standard/php_standard.h"
-#else
-#include "ext/standard/basic_functions.h"
-#endif
 
 #include "apr_strings.h"
 #include "ap_config.h"
@@ -53,15 +49,42 @@
 
 #include "php_apache.h"
 
-/* UnixWare and Netware define shutdown to _shutdown, which causes problems later
+/* UnixWare define shutdown to _shutdown, which causes problems later
  * on when using a structure member named shutdown. Since this source
- * file does not use the system call shutdown, it is safe to #undef it.K
+ * file does not use the system call shutdown, it is safe to #undef it.
  */
 #undef shutdown
 
 #define PHP_MAGIC_TYPE "application/x-httpd-php"
 #define PHP_SOURCE_MAGIC_TYPE "application/x-httpd-php-source"
 #define PHP_SCRIPT "php7-script"
+
+/* if apache's version is newer than 2.2.31 or 2.4.16 */
+#if MODULE_MAGIC_COOKIE == 0x41503232UL && AP_MODULE_MAGIC_AT_LEAST(20051115,40) || \
+	MODULE_MAGIC_COOKIE == 0x41503234UL && AP_MODULE_MAGIC_AT_LEAST(20120211,47)
+#define php_ap_map_http_request_error ap_map_http_request_error
+#else
+static int php_ap_map_http_request_error(apr_status_t rv, int status)
+{
+	switch (rv) {
+	case AP_FILTER_ERROR: {
+		return AP_FILTER_ERROR;
+	}
+	case APR_ENOSPC: {
+		return HTTP_REQUEST_ENTITY_TOO_LARGE;
+	}
+	case APR_ENOTIMPL: {
+		return HTTP_NOT_IMPLEMENTED;
+	}
+	case APR_ETIMEDOUT: {
+		return HTTP_REQUEST_TIME_OUT;
+	}
+	default: {
+		return status;
+	}
+	}
+}
+#endif
 
 /* A way to specify the location of the php.ini dir in an apache directive */
 char *apache2_php_ini_path_override = NULL;
@@ -184,6 +207,7 @@ php_apache_sapi_read_post(char *buf, size_t count_bytes)
 	php_struct *ctx = SG(server_context);
 	request_rec *r;
 	apr_bucket_brigade *brigade;
+	apr_status_t ret;
 
 	r = ctx->r;
 	brigade = ctx->brigade;
@@ -195,7 +219,7 @@ php_apache_sapi_read_post(char *buf, size_t count_bytes)
 	 * need to make sure that if data is available we fill the buffer completely.
 	 */
 
-	while (ap_get_brigade(r->input_filters, brigade, AP_MODE_READBYTES, APR_BLOCK_READ, len) == APR_SUCCESS) {
+	while ((ret=ap_get_brigade(r->input_filters, brigade, AP_MODE_READBYTES, APR_BLOCK_READ, len)) == APR_SUCCESS) {
 		apr_brigade_flatten(brigade, buf, &len);
 		apr_brigade_cleanup(brigade);
 		tlen += len;
@@ -204,6 +228,15 @@ php_apache_sapi_read_post(char *buf, size_t count_bytes)
 		}
 		buf += len;
 		len = count_bytes - tlen;
+	}
+
+	if (ret != APR_SUCCESS) {
+		AP2(post_read_error) = 1;
+		if (APR_STATUS_IS_TIMEUP(ret)) {
+			SG(sapi_headers).http_response_code = php_ap_map_http_request_error(ret, HTTP_REQUEST_TIME_OUT);
+		} else {
+			SG(sapi_headers).http_response_code = php_ap_map_http_request_error(ret, HTTP_BAD_REQUEST);
+		}
 	}
 
 	return tlen;
@@ -223,16 +256,9 @@ php_apache_sapi_get_stat(void)
 #endif
 	ctx->finfo.st_dev = ctx->r->finfo.device;
 	ctx->finfo.st_ino = ctx->r->finfo.inode;
-#if defined(NETWARE) && defined(CLIB_STAT_PATCH)
-	ctx->finfo.st_atime.tv_sec = apr_time_sec(ctx->r->finfo.atime);
-	ctx->finfo.st_mtime.tv_sec = apr_time_sec(ctx->r->finfo.mtime);
-	ctx->finfo.st_ctime.tv_sec = apr_time_sec(ctx->r->finfo.ctime);
-#else
 	ctx->finfo.st_atime = apr_time_sec(ctx->r->finfo.atime);
 	ctx->finfo.st_mtime = apr_time_sec(ctx->r->finfo.mtime);
 	ctx->finfo.st_ctime = apr_time_sec(ctx->r->finfo.ctime);
-#endif
-
 	ctx->finfo.st_size = ctx->r->finfo.size;
 	ctx->finfo.st_nlink = ctx->r->finfo.nlink;
 
@@ -314,16 +340,52 @@ php_apache_sapi_flush(void *server_context)
 	}
 }
 
-static void php_apache_sapi_log_message(char *msg)
+static void php_apache_sapi_log_message(char *msg, int syslog_type_int)
 {
 	php_struct *ctx;
+	int aplog_type = APLOG_ERR;
 
 	ctx = SG(server_context);
+
+	switch (syslog_type_int) {
+#if LOG_EMERG != LOG_CRIT
+		case LOG_EMERG:
+			aplog_type = APLOG_EMERG;
+			break;
+#endif
+#if LOG_ALERT != LOG_CRIT
+		case LOG_ALERT:
+			aplog_type = APLOG_ALERT;
+			break;
+#endif
+		case LOG_CRIT:
+			aplog_type = APLOG_CRIT;
+			break;
+		case LOG_ERR:
+			aplog_type = APLOG_ERR;
+			break;
+		case LOG_WARNING:
+			aplog_type = APLOG_WARNING;
+			break;
+		case LOG_NOTICE:
+			aplog_type = APLOG_NOTICE;
+			break;
+#if LOG_INFO != LOG_NOTICE
+		case LOG_INFO:
+			aplog_type = APLOG_INFO;
+			break;
+#endif
+#if LOG_NOTICE != LOG_DEBUG
+		case LOG_DEBUG:
+			aplog_type = APLOG_DEBUG;
+			break;
+#endif
+	}
 
 	if (ctx == NULL) { /* we haven't initialized our ctx yet, oh well */
 		ap_log_error(APLOG_MARK, APLOG_ERR | APLOG_STARTUP, 0, NULL, "%s", msg);
 	} else {
-		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, ctx->r, "%s", msg);
+		ap_log_rerror(APLOG_MARK, aplog_type, 0, ctx->r, "%s", msg);
 	}
 }
 
@@ -332,7 +394,7 @@ static void php_apache_sapi_log_message_ex(char *msg, request_rec *r)
 	if (r) {
 		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, msg, r->filename);
 	} else {
-		php_apache_sapi_log_message(msg);
+		php_apache_sapi_log_message(msg, -1);
 	}
 }
 
@@ -456,9 +518,7 @@ php_apache_server_startup(apr_pool_t *pconf, apr_pool_t *plog, apr_pool_t *ptemp
 	ZEND_TSRMLS_CACHE_UPDATE();
 #endif
 
-#ifdef ZEND_SIGNALS
 	zend_signal_startup();
-#endif
 
 	sapi_startup(&apache2_sapi_module);
 	apache2_sapi_module.startup(&apache2_sapi_module);
@@ -487,6 +547,7 @@ static int php_apache_request_ctor(request_rec *r, php_struct *ctx)
 	SG(request_info).proto_num = r->proto_num;
 	SG(request_info).request_uri = apr_pstrdup(r->pool, r->uri);
 	SG(request_info).path_translated = apr_pstrdup(r->pool, r->filename);
+	AP2(post_read_error) = 0;
 	r->no_local_copy = 1;
 
 	content_length = (char *) apr_table_get(r->headers_in, "Content-Length");
@@ -654,6 +715,13 @@ zend_first_try {
 		}
 		ctx->r = r;
 		brigade = ctx->brigade;
+	}
+
+	if (AP2(post_read_error)) {
+		ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, "Error while attempting to read POST data: %d", SG(sapi_headers).http_response_code);
+		apr_brigade_cleanup(brigade);
+		PHPAP_INI_OFF;
+		return SG(sapi_headers).http_response_code;
 	}
 
 	if (AP2(last_modified)) {

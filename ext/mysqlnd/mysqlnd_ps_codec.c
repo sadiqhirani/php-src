@@ -2,7 +2,7 @@
   +----------------------------------------------------------------------+
   | PHP Version 7                                                        |
   +----------------------------------------------------------------------+
-  | Copyright (c) 2006-2016 The PHP Group                                |
+  | Copyright (c) 2006-2017 The PHP Group                                |
   +----------------------------------------------------------------------+
   | This source file is subject to version 3.01 of the PHP license,      |
   | that is bundled with this package in the file LICENSE, and is        |
@@ -87,6 +87,7 @@ ps_fetch_from_1_to_8_bytes(zval * zv, const MYSQLND_FIELD * const field, const u
 			} else {
 				DBG_INF("stringify");
 				tmp_len = sprintf((char *)&tmp, MYSQLND_LLU_SPEC, uval);
+				DBG_INF_FMT("value=%s", tmp);
 			}
 		}
 	} else {
@@ -184,7 +185,7 @@ ps_fetch_float(zval * zv, const MYSQLND_FIELD * const field, const unsigned int 
 # define NOT_FIXED_DEC 31
 #endif
 
-	dval = mysql_float_to_double(fval, (field->decimals >= NOT_FIXED_DEC) ? -1 : field->decimals);
+	dval = mysql_float_to_double(fval, (field->decimals >= NOT_FIXED_DEC) ? -1 : (int)field->decimals);
 
 	ZVAL_DOUBLE(zv, dval);
 	DBG_VOID_RETURN;

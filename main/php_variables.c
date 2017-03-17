@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | PHP Version 7                                                        |
    +----------------------------------------------------------------------+
-   | Copyright (c) 1997-2016 The PHP Group                                |
+   | Copyright (c) 1997-2017 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -79,7 +79,7 @@ PHPAPI void php_register_variable_ex(char *var_name, zval *val, zval *track_vars
 
 
 	/* ignore leading spaces in the variable name */
-	while (*var_name && *var_name==' ') {
+	while (*var_name==' ') {
 		var_name++;
 	}
 
@@ -107,6 +107,26 @@ PHPAPI void php_register_variable_ex(char *var_name, zval *val, zval *track_vars
 		zval_dtor(val);
 		free_alloca(var_orig, use_heap);
 		return;
+	}
+
+	if (var_len == sizeof("this")-1 && EG(current_execute_data)) {
+		zend_execute_data *ex = EG(current_execute_data);
+
+		while (ex) {
+			if (ex->func && ZEND_USER_CODE(ex->func->common.type)) {
+				if ((ZEND_CALL_INFO(ex) & ZEND_CALL_HAS_SYMBOL_TABLE)
+						&& ex->symbol_table == symtable1) {
+					if (memcmp(var, "this", sizeof("this")-1) == 0) {
+						zend_throw_error(NULL, "Cannot re-assign $this");
+						zval_dtor(val);
+						free_alloca(var_orig, use_heap);
+						return;
+					}
+				}
+				break;
+			}
+			ex = ex->prev_execute_data;
+		}
 	}
 
 	/* GLOBALS hijack attempt, reject parameter */
@@ -239,11 +259,14 @@ typedef struct post_var_data {
 	char *ptr;
 	char *end;
 	uint64_t cnt;
+
+	/* Bytes in ptr that have already been scanned for '&' */
+	size_t already_scanned;
 } post_var_data_t;
 
 static zend_bool add_post_var(zval *arr, post_var_data_t *var, zend_bool eof)
 {
-	char *ksep, *vsep, *val;
+	char *start, *ksep, *vsep, *val;
 	size_t klen, vlen;
 	size_t new_vlen;
 
@@ -251,9 +274,11 @@ static zend_bool add_post_var(zval *arr, post_var_data_t *var, zend_bool eof)
 		return 0;
 	}
 
-	vsep = memchr(var->ptr, '&', var->end - var->ptr);
+	start = var->ptr + var->already_scanned;
+	vsep = memchr(start, '&', var->end - start);
 	if (!vsep) {
 		if (!eof) {
+			var->already_scanned = var->end - var->ptr;
 			return 0;
 		} else {
 			vsep = var->end;
@@ -286,6 +311,7 @@ static zend_bool add_post_var(zval *arr, post_var_data_t *var, zend_bool eof)
 	efree(val);
 
 	var->ptr = vsep + (vsep != var->end);
+	var->already_scanned = 0;
 	return 1;
 }
 
@@ -305,7 +331,7 @@ static inline int add_post_vars(zval *arr, post_var_data_t *vars, zend_bool eof)
 		}
 	}
 
-	if (!eof) {
+	if (!eof && ZSTR_VAL(vars->str.s) != vars->ptr) {
 		memmove(ZSTR_VAL(vars->str.s), vars->ptr, ZSTR_LEN(vars->str.s) = vars->end - vars->ptr);
 	}
 	return SUCCESS;
@@ -516,7 +542,7 @@ void _php_import_environment_variables(zval *array_ptr)
 	}
 }
 
-zend_bool php_std_auto_global_callback(char *name, uint name_len)
+zend_bool php_std_auto_global_callback(char *name, uint32_t name_len)
 {
 	zend_printf("%s\n", name);
 	return 0; /* don't rearm */
@@ -584,7 +610,7 @@ PHPAPI void php_build_argv(char *s, zval *track_vars_array)
 		zend_hash_str_update(Z_ARRVAL_P(track_vars_array), "argv", sizeof("argv")-1, &arr);
 		zend_hash_str_update(Z_ARRVAL_P(track_vars_array), "argc", sizeof("argc")-1, &argc);
 	}
-	zval_ptr_dtor(&arr);
+	zval_ptr_dtor_nogc(&arr);
 }
 /* }}} */
 
@@ -730,6 +756,22 @@ static zend_bool php_auto_globals_create_files(zend_string *name)
 	return 0; /* don't rearm */
 }
 
+/* Upgly hack to fix HTTP_PROXY issue, see bug #72573 */
+static void check_http_proxy(HashTable *var_table)
+{
+	if (zend_hash_str_exists(var_table, "HTTP_PROXY", sizeof("HTTP_PROXY")-1)) {
+		char *local_proxy = getenv("HTTP_PROXY");
+
+		if (!local_proxy) {
+			zend_hash_str_del(var_table, "HTTP_PROXY", sizeof("HTTP_PROXY")-1);
+		} else {
+			zval local_zval;
+			ZVAL_STRING(&local_zval, local_proxy);
+			zend_hash_str_update(var_table, "HTTP_PROXY", sizeof("HTTP_PROXY")-1, &local_zval);
+		}
+	}
+}
+
 static zend_bool php_auto_globals_create_server(zend_string *name)
 {
 	if (PG(variables_order) && (strchr(PG(variables_order),'S') || strchr(PG(variables_order),'s'))) {
@@ -755,8 +797,14 @@ static zend_bool php_auto_globals_create_server(zend_string *name)
 		array_init(&PG(http_globals)[TRACK_VARS_SERVER]);
 	}
 
+	check_http_proxy(Z_ARRVAL(PG(http_globals)[TRACK_VARS_SERVER]));
 	zend_hash_update(&EG(symbol_table), name, &PG(http_globals)[TRACK_VARS_SERVER]);
 	Z_ADDREF(PG(http_globals)[TRACK_VARS_SERVER]);
+
+	/* TODO: TRACK_VARS_SERVER is modified in a number of places (e.g. phar) past this point,
+	 * where rc>1 due to the $_SERVER global. Ideally this shouldn't happen, but for now we
+	 * ignore this issue, as it would probably require larger changes. */
+	HT_ALLOW_COW_VIOLATION(Z_ARRVAL(PG(http_globals)[TRACK_VARS_SERVER]));
 
 	return 0; /* don't rearm */
 }
@@ -770,6 +818,7 @@ static zend_bool php_auto_globals_create_env(zend_string *name)
 		php_import_environment_variables(&PG(http_globals)[TRACK_VARS_ENV]);
 	}
 
+	check_http_proxy(Z_ARRVAL(PG(http_globals)[TRACK_VARS_ENV]));
 	zend_hash_update(&EG(symbol_table), name, &PG(http_globals)[TRACK_VARS_ENV]);
 	Z_ADDREF(PG(http_globals)[TRACK_VARS_ENV]);
 
